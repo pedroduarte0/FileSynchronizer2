@@ -1,7 +1,7 @@
-Feature: Sync readiness
-  The scaffold should expose the first public sync seam to integration tests.
+Feature: One-way sync preview
+  The scaffold should expose the first public sync application service seam to integration tests.
 
-  Scenario: One-way sync mode is available
-    Given the sync readiness provider is available
-    When the integration test asks which sync modes are supported
-    Then one-way sync should be supported
+  Scenario: Empty one-way sync pair previews no file actions
+    Given an empty one-way sync pair
+    When the sync preview is requested
+    Then the sync plan should contain no file actions

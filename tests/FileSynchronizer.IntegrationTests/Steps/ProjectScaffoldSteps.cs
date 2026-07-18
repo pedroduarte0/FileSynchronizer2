@@ -1,5 +1,4 @@
 using FileSynchronizer.Core;
-using FileSynchronizer.Infrastructure;
 using Reqnroll;
 
 namespace FileSynchronizer.IntegrationTests.Steps;
@@ -7,35 +6,35 @@ namespace FileSynchronizer.IntegrationTests.Steps;
 [Binding]
 public sealed class ProjectScaffoldSteps
 {
-    private SyncReadinessProvider? _provider;
-    private SyncReadiness? _readiness;
+    private readonly SyncApplicationService _syncApplicationService = new();
+    private SyncPair? _syncPair;
+    private SyncPlan? _syncPlan;
 
-    [Given("the sync readiness provider is available")]
-    public void GivenTheSyncReadinessProviderIsAvailable()
+    [Given("an empty one-way sync pair")]
+    public void GivenAnEmptyOneWaySyncPair()
     {
         // Arrange
-        var provider = new SyncReadinessProvider();
+        var syncPair = new SyncPair(SyncMode.OneWay, "source", "target");
 
         // Act
-        _provider = provider;
+        _syncPair = syncPair;
     }
 
-    [When("the integration test asks which sync modes are supported")]
-    public void WhenTheIntegrationTestAsksWhichSyncModesAreSupported()
+    [When("the sync preview is requested")]
+    public void WhenTheSyncPreviewIsRequested()
     {
         // Arrange
-        Assert.NotNull(_provider);
+        Assert.NotNull(_syncPair);
 
         // Act
-        _readiness = _provider.GetReadiness();
+        _syncPlan = _syncApplicationService.Preview(_syncPair);
     }
 
-    [Then("one-way sync should be supported")]
-    public void ThenOneWaySyncShouldBeSupported()
+    [Then("the sync plan should contain no file actions")]
+    public void ThenTheSyncPlanShouldContainNoFileActions()
     {
         // Assert
-        Assert.NotNull(_readiness);
-        Assert.True(_readiness.Supports(SyncMode.OneWay));
+        Assert.NotNull(_syncPlan);
+        Assert.Empty(_syncPlan.Actions);
     }
-
 }
