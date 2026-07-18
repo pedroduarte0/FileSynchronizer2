@@ -1,0 +1,11 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/FileSynchronizer.App/FileSynchronizer.App.csproj" />
+    <Project Path="src/FileSynchronizer.Core/FileSynchronizer.Core.csproj" />
+    <Project Path="src/FileSynchronizer.Infrastructure/FileSynchronizer.Infrastructure.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/FileSynchronizer.Core.Tests/FileSynchronizer.Core.Tests.csproj" />
+    <Project Path="tests/FileSynchronizer.IntegrationTests/FileSynchronizer.IntegrationTests.csproj" />
+  </Folder>
+</Solution>
