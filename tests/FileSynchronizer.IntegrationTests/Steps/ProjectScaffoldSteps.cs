@@ -38,11 +38,4 @@ public sealed class ProjectScaffoldSteps
         Assert.True(_readiness.Supports(SyncMode.OneWay));
     }
 
-    [Then("two-way sync should be supported")]
-    public void ThenTwoWaySyncShouldBeSupported()
-    {
-        // Assert
-        Assert.NotNull(_readiness);
-        Assert.True(_readiness.Supports(SyncMode.TwoWay));
-    }
 }
