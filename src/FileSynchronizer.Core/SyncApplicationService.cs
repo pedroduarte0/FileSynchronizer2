@@ -107,11 +107,11 @@ public sealed class SyncApplicationService
             cancellationToken);
     }
 
-    private async Task ApplyDeleteActionAsync(DeleteFileSyncAction action, CancellationToken cancellationToken)
+    private Task ApplyDeleteActionAsync(DeleteFileSyncAction action, CancellationToken cancellationToken)
     {
         var targetProvider = GetProvider(action.TargetLocation);
 
-        await targetProvider.DeleteFileAsync(action.RelativePath, cancellationToken);
+        return targetProvider.DeleteFileAsync(action.RelativePath, cancellationToken);
     }
 
     private ISyncLocationProvider GetProvider(SyncLocation location)
