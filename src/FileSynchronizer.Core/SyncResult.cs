@@ -1,3 +1,6 @@
 namespace FileSynchronizer.Core;
 
-public sealed record SyncResult(IReadOnlyCollection<SyncActionOutcome> Outcomes, SyncState UpdatedState);
+public sealed record SyncResult(
+    IReadOnlyCollection<SyncActionOutcome> Outcomes,
+    SyncState UpdatedState,
+    IReadOnlyCollection<SyncLocationProblem> Problems);
