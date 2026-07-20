@@ -24,8 +24,6 @@ public sealed class SyncApplicationServiceTests
         var action = Assert.Single(plan.Actions);
         var copy = Assert.IsType<CopyFileSyncAction>(action);
         Assert.Equal("notes.txt", copy.RelativePath);
-        Assert.Equal(sourceLocation, copy.SourceLocation);
-        Assert.Equal(targetLocation, copy.TargetLocation);
     }
 
     [Fact]
@@ -48,7 +46,30 @@ public sealed class SyncApplicationServiceTests
         var action = Assert.Single(plan.Actions);
         var delete = Assert.IsType<DeleteFileSyncAction>(action);
         Assert.Equal("stale.txt", delete.RelativePath);
-        Assert.Equal(targetLocation, delete.TargetLocation);
+    }
+
+    [Fact]
+    public async Task BuildPlanAsync_returns_overwrite_action_for_same_path_file_with_different_metadata()
+    {
+        // Arrange
+        var sourceLocation = new SyncLocation("source");
+        var targetLocation = new SyncLocation("target");
+        var syncPair = new SyncPair(SyncMode.OneWay, sourceLocation, targetLocation);
+        var sourceProvider = InMemorySyncLocationProvider.WithFiles(
+            sourceLocation,
+            new SyncFile("notes.txt", DateTimeOffset.Parse("2026-07-20T10:00:00Z"), 20));
+        var targetProvider = InMemorySyncLocationProvider.WithFiles(
+            targetLocation,
+            new SyncFile("notes.txt", DateTimeOffset.Parse("2026-07-20T09:00:00Z"), 10));
+        var service = new SyncApplicationService([sourceProvider, targetProvider]);
+
+        // Act
+        var plan = await service.BuildPlanAsync(syncPair, CancellationToken.None);
+
+        // Assert
+        var action = Assert.Single(plan.Actions);
+        var overwrite = Assert.IsType<OverwriteFileSyncAction>(action);
+        Assert.Equal("notes.txt", overwrite.RelativePath);
     }
 
     [Fact]
@@ -81,7 +102,7 @@ public sealed class SyncApplicationServiceTests
         var service = new SyncApplicationService([sourceProvider, targetProvider]);
         var plan = new SyncPlan(
             syncPair,
-            [new CopyFileSyncAction(sourceLocation, targetLocation, sourceFile.RelativePath)]);
+            [new CopyFileSyncAction(sourceFile.RelativePath)]);
 
         // Act
         var result = await service.ApplyPlanAsync(plan, CancellationToken.None);
@@ -107,7 +128,7 @@ public sealed class SyncApplicationServiceTests
             [InMemorySyncLocationProvider.Empty(sourceLocation), targetProvider]);
         var plan = new SyncPlan(
             syncPair,
-            [new DeleteFileSyncAction(targetLocation, "stale.txt")]);
+            [new DeleteFileSyncAction("stale.txt")]);
 
         // Act
         var result = await service.ApplyPlanAsync(plan, CancellationToken.None);

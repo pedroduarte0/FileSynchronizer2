@@ -39,12 +39,17 @@ public sealed class SyncApplicationService
             switch (action)
             {
                 case CopyFileSyncAction copy:
-                    await ApplyCopyActionAsync(copy, cancellationToken);
+                    await ApplyCopyActionAsync(plan.SyncPair, copy.RelativePath, cancellationToken);
                     outcomes.Add(new SyncActionOutcome(copy, SyncActionStatus.Applied));
                     break;
 
+                case OverwriteFileSyncAction overwrite:
+                    await ApplyCopyActionAsync(plan.SyncPair, overwrite.RelativePath, cancellationToken);
+                    outcomes.Add(new SyncActionOutcome(overwrite, SyncActionStatus.Applied));
+                    break;
+
                 case DeleteFileSyncAction delete:
-                    await ApplyDeleteActionAsync(delete, cancellationToken);
+                    await ApplyDeleteActionAsync(plan.SyncPair, delete.RelativePath, cancellationToken);
                     outcomes.Add(new SyncActionOutcome(delete, SyncActionStatus.Applied));
                     break;
 
@@ -72,46 +77,60 @@ public sealed class SyncApplicationService
         var sourcePaths = sourceFiles
             .Select(file => file.RelativePath)
             .ToHashSet(StringComparer.Ordinal);
+        var targetFilesByPath = targetFiles.ToDictionary(file => file.RelativePath, StringComparer.Ordinal);
 
         List<SyncPlanAction> actions =
         [
             .. sourceFiles
             .Where(file => !targetPaths.Contains(file.RelativePath))
-            .Select(file => new CopyFileSyncAction(
-                syncPair.SourceLocation,
-                syncPair.TargetLocation,
-                file.RelativePath)),
+            .Select(file => new CopyFileSyncAction(file.RelativePath)),
+
+            .. sourceFiles
+            .Where(file =>
+                targetFilesByPath.TryGetValue(file.RelativePath, out var targetFile)
+                && HasDifferentMetadata(file, targetFile))
+            .Select(file => new OverwriteFileSyncAction(file.RelativePath)),
 
             .. targetFiles
             .Where(file => !sourcePaths.Contains(file.RelativePath))
-            .Select(file => new DeleteFileSyncAction(
-                syncPair.TargetLocation,
-                file.RelativePath)),
+            .Select(file => new DeleteFileSyncAction(file.RelativePath)),
         ];
 
         return new SyncPlan(syncPair, actions);
     }
 
-    private async Task ApplyCopyActionAsync(CopyFileSyncAction action, CancellationToken cancellationToken)
+    private static bool HasDifferentMetadata(SyncFile sourceFile, SyncFile targetFile)
     {
-        var sourceProvider = GetProvider(action.SourceLocation);
-        var targetProvider = GetProvider(action.TargetLocation);
-        var sourceFiles = await sourceProvider.ListFilesAsync(cancellationToken);
-        var sourceFile = sourceFiles.Single(file => file.RelativePath == action.RelativePath);
+        return sourceFile.LastModifiedUtc != targetFile.LastModifiedUtc
+            || sourceFile.Size != targetFile.Size;
+    }
 
-        await using var content = await sourceProvider.OpenReadAsync(action.RelativePath, cancellationToken);
+    private async Task ApplyCopyActionAsync(
+        SyncPair syncPair,
+        string relativePath,
+        CancellationToken cancellationToken)
+    {
+        var sourceProvider = GetProvider(syncPair.SourceLocation);
+        var targetProvider = GetProvider(syncPair.TargetLocation);
+        var sourceFiles = await sourceProvider.ListFilesAsync(cancellationToken);
+        var sourceFile = sourceFiles.Single(file => file.RelativePath == relativePath);
+
+        await using var content = await sourceProvider.OpenReadAsync(relativePath, cancellationToken);
         await targetProvider.WriteFileAsync(
-            action.RelativePath,
+            relativePath,
             content,
             sourceFile.LastModifiedUtc,
             cancellationToken);
     }
 
-    private Task ApplyDeleteActionAsync(DeleteFileSyncAction action, CancellationToken cancellationToken)
+    private Task ApplyDeleteActionAsync(
+        SyncPair syncPair,
+        string relativePath,
+        CancellationToken cancellationToken)
     {
-        var targetProvider = GetProvider(action.TargetLocation);
+        var targetProvider = GetProvider(syncPair.TargetLocation);
 
-        return targetProvider.DeleteFileAsync(action.RelativePath, cancellationToken);
+        return targetProvider.DeleteFileAsync(relativePath, cancellationToken);
     }
 
     private ISyncLocationProvider GetProvider(SyncLocation location)
