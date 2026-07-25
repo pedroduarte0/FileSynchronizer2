@@ -176,6 +176,38 @@ public sealed class LocalSyncLocationProviderTests : IDisposable
     }
 
     [Fact]
+    public async Task ListEntriesAsync_reports_root_symbolic_link_without_following_it_when_links_can_be_created()
+    {
+        // Arrange
+        var targetDirectoryPath = Path.Combine(_rootPath, "target");
+        var linkPath = Path.Combine(_rootPath, "root-link");
+        Directory.CreateDirectory(targetDirectoryPath);
+        await File.WriteAllTextAsync(Path.Combine(targetDirectoryPath, "notes.txt"), "hello");
+
+        try
+        {
+            Directory.CreateSymbolicLink(linkPath, targetDirectoryPath);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or PlatformNotSupportedException)
+        {
+            return;
+        }
+
+        var provider = new LocalSyncLocationProvider(new SyncLocation(linkPath));
+
+        // Act
+        var listing = await provider.ListEntriesAsync(CancellationToken.None);
+
+        // Assert
+        var symbolicLink = Assert.Single(listing.SymbolicLinks);
+        Assert.Equal(string.Empty, symbolicLink.RelativePath);
+        Assert.Equal(targetDirectoryPath, symbolicLink.TargetPath);
+        Assert.Empty(listing.Files);
+        Assert.Empty(listing.EmptyDirectories);
+        Assert.Empty(listing.Problems);
+    }
+
+    [Fact]
     public async Task OpenReadAsync_reports_symbolic_link_as_unsupported_when_links_can_be_created()
     {
         // Arrange

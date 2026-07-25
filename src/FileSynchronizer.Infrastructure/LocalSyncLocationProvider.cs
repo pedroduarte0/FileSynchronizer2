@@ -14,7 +14,28 @@ public sealed class LocalSyncLocationProvider : ISyncLocationProvider
 
     public SyncLocation Location { get; }
 
+    public string LocalRootPath => _rootPath;
+
+    public StringComparer RelativePathComparer => OperatingSystem.IsWindows()
+        ? StringComparer.OrdinalIgnoreCase
+        : StringComparer.Ordinal;
+
     public bool SupportsSymbolicLinkPreservation => false;
+
+    public Task<long?> GetAvailableStorageBytesAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            var driveRoot = Path.GetPathRoot(_rootPath);
+            return string.IsNullOrWhiteSpace(driveRoot)
+                ? Task.FromResult<long?>(null)
+                : Task.FromResult<long?>(new DriveInfo(driveRoot).AvailableFreeSpace);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            return Task.FromResult<long?>(null);
+        }
+    }
 
     public async Task<IReadOnlyCollection<SyncFile>> ListFilesAsync(CancellationToken cancellationToken)
     {
@@ -29,6 +50,12 @@ public sealed class LocalSyncLocationProvider : ISyncLocationProvider
         var emptyDirectories = new List<SyncDirectory>();
         var symbolicLinks = new List<SyncSymbolicLink>();
         var problems = new List<SyncLocationProblem>();
+        var hiddenEntries = new List<string>();
+
+        if (TryAddRootSymbolicLink(symbolicLinks, problems))
+        {
+            return Task.FromResult(new SyncLocationListing(files, emptyDirectories, symbolicLinks, problems, hiddenEntries));
+        }
 
         if (!Directory.Exists(_rootPath))
         {
@@ -36,12 +63,41 @@ public sealed class LocalSyncLocationProvider : ISyncLocationProvider
                 SyncLocationProblemKind.AccessProblem,
                 string.Empty,
                 $"Local sync location '{_rootPath}' does not exist."));
-            return Task.FromResult(new SyncLocationListing(files, emptyDirectories, symbolicLinks, problems));
+            return Task.FromResult(new SyncLocationListing(files, emptyDirectories, symbolicLinks, problems, hiddenEntries));
         }
 
-        AddDirectoryEntries(_rootPath, files, emptyDirectories, symbolicLinks, problems, cancellationToken);
+        AddDirectoryEntries(
+            _rootPath,
+            files,
+            emptyDirectories,
+            symbolicLinks,
+            problems,
+            hiddenEntries,
+            cancellationToken);
 
-        return Task.FromResult(new SyncLocationListing(files, emptyDirectories, symbolicLinks, problems));
+        return Task.FromResult(new SyncLocationListing(files, emptyDirectories, symbolicLinks, problems, hiddenEntries));
+    }
+
+    private bool TryAddRootSymbolicLink(
+        List<SyncSymbolicLink> symbolicLinks,
+        List<SyncLocationProblem> problems)
+    {
+        try
+        {
+            var linkTarget = new DirectoryInfo(_rootPath).LinkTarget;
+            if (linkTarget is null)
+            {
+                return false;
+            }
+
+            symbolicLinks.Add(new SyncSymbolicLink(string.Empty, linkTarget));
+            return true;
+        }
+        catch (Exception exception) when (IsAccessException(exception))
+        {
+            problems.Add(CreateProblem(SyncLocationProblemKind.AccessProblem, _rootPath, exception));
+            return true;
+        }
     }
 
     public Task<Stream> OpenReadAsync(string relativePath, CancellationToken cancellationToken)
@@ -166,6 +222,7 @@ public sealed class LocalSyncLocationProvider : ISyncLocationProvider
         List<SyncDirectory> emptyDirectories,
         List<SyncSymbolicLink> symbolicLinks,
         List<SyncLocationProblem> problems,
+        List<string> hiddenEntries,
         CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -191,6 +248,11 @@ public sealed class LocalSyncLocationProvider : ISyncLocationProvider
         {
             cancellationToken.ThrowIfCancellationRequested();
 
+            if (IsHidden(entry))
+            {
+                hiddenEntries.Add(ToRelativePath(entry.FullName));
+            }
+
             if (IsSymbolicLink(entry))
             {
                 symbolicLinks.Add(new SyncSymbolicLink(
@@ -207,6 +269,7 @@ public sealed class LocalSyncLocationProvider : ISyncLocationProvider
                     emptyDirectories,
                     symbolicLinks,
                     problems,
+                    hiddenEntries,
                     cancellationToken);
                 continue;
             }
@@ -280,6 +343,12 @@ public sealed class LocalSyncLocationProvider : ISyncLocationProvider
     private static bool IsSymbolicLink(FileSystemInfo entry)
     {
         return entry.LinkTarget is not null;
+    }
+
+    private static bool IsHidden(FileSystemInfo entry)
+    {
+        return entry.Name.StartsWith(".", StringComparison.Ordinal)
+            || (entry.Attributes & FileAttributes.Hidden) != 0;
     }
 
     private static bool IsAccessException(Exception exception)

@@ -73,6 +73,106 @@ public sealed class SyncApplicationServiceTests
     }
 
     [Fact]
+    public async Task BuildPlanAsync_matches_case_only_path_differences_for_case_insensitive_target()
+    {
+        // Arrange
+        var sourceLocation = new SyncLocation("source");
+        var targetLocation = new SyncLocation("target");
+        var syncPair = new SyncPair(SyncMode.OneWay, sourceLocation, targetLocation);
+        var sourceProvider = new PlanningSyncLocationProvider(
+            sourceLocation,
+            files: [new SyncFile("Notes.txt", DateTimeOffset.Parse("2026-07-20T10:00:00Z"), 10)]);
+        var targetProvider = new PlanningSyncLocationProvider(
+            targetLocation,
+            files: [new SyncFile("notes.txt", DateTimeOffset.Parse("2026-07-20T09:00:00Z"), 5)],
+            relativePathComparer: StringComparer.OrdinalIgnoreCase);
+        var service = new SyncApplicationService([sourceProvider, targetProvider]);
+
+        // Act
+        var plan = await service.BuildPlanAsync(syncPair, CancellationToken.None);
+
+        // Assert
+        var action = Assert.Single(plan.Actions);
+        var overwrite = Assert.IsType<OverwriteFileSyncAction>(action);
+        Assert.Equal("Notes.txt", overwrite.RelativePath);
+    }
+
+    [Fact]
+    public async Task BuildPlanAsync_reports_case_collision_for_case_insensitive_target()
+    {
+        // Arrange
+        var sourceLocation = new SyncLocation("source");
+        var targetLocation = new SyncLocation("target");
+        var syncPair = new SyncPair(SyncMode.OneWay, sourceLocation, targetLocation);
+        var sourceProvider = new PlanningSyncLocationProvider(
+            sourceLocation,
+            files:
+            [
+                new SyncFile("Notes.txt", DateTimeOffset.Parse("2026-07-20T10:00:00Z"), 5),
+                new SyncFile("notes.txt", DateTimeOffset.Parse("2026-07-20T10:00:00Z"), 5),
+            ]);
+        var targetProvider = new PlanningSyncLocationProvider(
+            targetLocation,
+            relativePathComparer: StringComparer.OrdinalIgnoreCase);
+        var service = new SyncApplicationService([sourceProvider, targetProvider]);
+
+        // Act
+        var plan = await service.BuildPlanAsync(syncPair, CancellationToken.None);
+
+        // Assert
+        Assert.Empty(plan.Actions);
+        Assert.Contains(plan.Problems, problem => problem.Kind == SyncLocationProblemKind.CaseCollision);
+    }
+
+    [Fact]
+    public async Task BuildPlanAsync_blocks_overlapping_local_locations_before_enumeration()
+    {
+        // Arrange
+        var sourceLocation = new SyncLocation("source");
+        var targetLocation = new SyncLocation("target");
+        var syncPair = new SyncPair(SyncMode.OneWay, sourceLocation, targetLocation);
+        var sourceRoot = Path.Combine(Path.GetTempPath(), "sync");
+        var sourceProvider = new PlanningSyncLocationProvider(sourceLocation, sourceRoot);
+        var targetProvider = new PlanningSyncLocationProvider(
+            targetLocation,
+            Path.Combine(sourceRoot, "archive"));
+        var service = new SyncApplicationService([sourceProvider, targetProvider]);
+
+        // Act
+        var plan = await service.BuildPlanAsync(syncPair, CancellationToken.None);
+
+        // Assert
+        Assert.Empty(plan.Actions);
+        Assert.Equal(0, sourceProvider.ListEntriesCallCount);
+        Assert.Equal(0, targetProvider.ListEntriesCallCount);
+        Assert.Contains(plan.Problems, problem => problem.Kind == SyncLocationProblemKind.OverlappingLocation);
+    }
+
+    [Fact]
+    public async Task BuildPlanAsync_reports_hidden_entries_empty_directories_and_storage_risk()
+    {
+        // Arrange
+        var sourceLocation = new SyncLocation("source");
+        var targetLocation = new SyncLocation("target");
+        var syncPair = new SyncPair(SyncMode.OneWay, sourceLocation, targetLocation);
+        var sourceProvider = new PlanningSyncLocationProvider(
+            sourceLocation,
+            files: [new SyncFile(".settings", DateTimeOffset.Parse("2026-07-20T10:00:00Z"), 10)],
+            directories: [new SyncDirectory("empty")],
+            hiddenEntries: [".settings"]);
+        var targetProvider = new PlanningSyncLocationProvider(targetLocation, availableStorageBytes: 5);
+        var service = new SyncApplicationService([sourceProvider, targetProvider]);
+
+        // Act
+        var plan = await service.BuildPlanAsync(syncPair, CancellationToken.None);
+
+        // Assert
+        Assert.Contains(plan.Problems, problem => problem.Kind == SyncLocationProblemKind.HiddenItem);
+        Assert.Contains(plan.Problems, problem => problem.Kind == SyncLocationProblemKind.EmptyDirectory);
+        Assert.Contains(plan.Problems, problem => problem.Kind == SyncLocationProblemKind.StorageRisk);
+    }
+
+    [Fact]
     public async Task UpdateStateAsync_returns_files_observed_at_sync_location()
     {
         // Arrange
@@ -113,6 +213,31 @@ public sealed class SyncApplicationServiceTests
     }
 
     [Fact]
+    public async Task BuildPlanAsync_does_not_plan_deletions_when_source_has_access_problem()
+    {
+        // Arrange
+        var sourceLocation = new SyncLocation("source");
+        var targetLocation = new SyncLocation("target");
+        var syncPair = new SyncPair(SyncMode.OneWay, sourceLocation, targetLocation);
+        var accessProblem = new SyncLocationProblem(
+            SyncLocationProblemKind.AccessProblem,
+            string.Empty,
+            "Source cannot be listed.");
+        var sourceProvider = InMemorySyncLocationProvider.Empty(sourceLocation, accessProblem);
+        var targetProvider = InMemorySyncLocationProvider.WithFiles(
+            targetLocation,
+            new SyncFile("important.txt", DateTimeOffset.Parse("2026-07-20T10:00:00Z"), 5));
+        var service = new SyncApplicationService([sourceProvider, targetProvider]);
+
+        // Act
+        var plan = await service.BuildPlanAsync(syncPair, CancellationToken.None);
+
+        // Assert
+        Assert.Empty(plan.Actions);
+        Assert.Contains(plan.Problems, problem => problem == accessProblem);
+    }
+
+    [Fact]
     public async Task BuildPlanAsync_reports_symbolic_links_as_unsupported_plan_problems()
     {
         // Arrange
@@ -132,6 +257,54 @@ public sealed class SyncApplicationServiceTests
         var problem = Assert.Single(plan.Problems);
         Assert.Equal(SyncLocationProblemKind.UnsupportedSymbolicLink, problem.Kind);
         Assert.Equal("link.txt", problem.RelativePath);
+    }
+
+    [Fact]
+    public async Task BuildPlanAsync_does_not_plan_deletions_when_source_root_is_unsupported_symbolic_link()
+    {
+        // Arrange
+        var sourceLocation = new SyncLocation("source");
+        var targetLocation = new SyncLocation("target");
+        var syncPair = new SyncPair(SyncMode.OneWay, sourceLocation, targetLocation);
+        var sourceProvider = InMemorySyncLocationProvider.WithSymbolicLinks(
+            sourceLocation,
+            new SyncSymbolicLink(string.Empty, "linked-source"));
+        var targetProvider = InMemorySyncLocationProvider.WithFiles(
+            targetLocation,
+            new SyncFile("important.txt", DateTimeOffset.Parse("2026-07-20T10:00:00Z"), 5));
+        var service = new SyncApplicationService([sourceProvider, targetProvider]);
+
+        // Act
+        var plan = await service.BuildPlanAsync(syncPair, CancellationToken.None);
+
+        // Assert
+        Assert.Empty(plan.Actions);
+        Assert.Contains(plan.Problems, problem => problem.Kind == SyncLocationProblemKind.UnsupportedSymbolicLink);
+    }
+
+    [Fact]
+    public async Task BuildPlanAsync_protects_only_nested_unsupported_symbolic_link_path_from_deletion()
+    {
+        // Arrange
+        var sourceLocation = new SyncLocation("source");
+        var targetLocation = new SyncLocation("target");
+        var syncPair = new SyncPair(SyncMode.OneWay, sourceLocation, targetLocation);
+        var sourceProvider = InMemorySyncLocationProvider.WithSymbolicLinks(
+            sourceLocation,
+            new SyncSymbolicLink("linked", "linked-source"));
+        var targetProvider = InMemorySyncLocationProvider.WithFiles(
+            targetLocation,
+            new SyncFile("linked/important.txt", DateTimeOffset.Parse("2026-07-20T10:00:00Z"), 5),
+            new SyncFile("stale.txt", DateTimeOffset.Parse("2026-07-20T10:00:00Z"), 5));
+        var service = new SyncApplicationService([sourceProvider, targetProvider]);
+
+        // Act
+        var plan = await service.BuildPlanAsync(syncPair, CancellationToken.None);
+
+        // Assert
+        var action = Assert.Single(plan.Actions);
+        var delete = Assert.IsType<DeleteFileSyncAction>(action);
+        Assert.Equal("stale.txt", delete.RelativePath);
     }
 
     [Fact]
@@ -198,6 +371,99 @@ public sealed class SyncApplicationServiceTests
         var action = Assert.Single(plan.Actions);
         var deleteDirectory = Assert.IsType<DeleteDirectorySyncAction>(action);
         Assert.Equal("stale", deleteDirectory.RelativePath);
+    }
+
+    [Fact]
+    public async Task BuildPlanAsync_deletes_inferred_target_directories_deepest_first()
+    {
+        // Arrange
+        var sourceLocation = new SyncLocation("source");
+        var targetLocation = new SyncLocation("target");
+        var syncPair = new SyncPair(SyncMode.OneWay, sourceLocation, targetLocation);
+        var sourceProvider = new PlanningSyncLocationProvider(sourceLocation);
+        var targetProvider = new PlanningSyncLocationProvider(
+            targetLocation,
+            files: [new SyncFile("archive/old/stale.txt", DateTimeOffset.Parse("2026-07-20T10:00:00Z"), 5)]);
+        var service = new SyncApplicationService([sourceProvider, targetProvider]);
+
+        // Act
+        var plan = await service.BuildPlanAsync(syncPair, CancellationToken.None);
+
+        // Assert
+        Assert.Collection(
+            plan.Actions,
+            action => Assert.IsType<DeleteFileSyncAction>(action),
+            action => Assert.Equal("archive/old", Assert.IsType<DeleteDirectorySyncAction>(action).RelativePath),
+            action => Assert.Equal("archive", Assert.IsType<DeleteDirectorySyncAction>(action).RelativePath));
+    }
+
+    [Fact]
+    public async Task BuildPlanAsync_does_not_delete_empty_target_directory_that_contains_source_files()
+    {
+        // Arrange
+        var sourceLocation = new SyncLocation("source");
+        var targetLocation = new SyncLocation("target");
+        var syncPair = new SyncPair(SyncMode.OneWay, sourceLocation, targetLocation);
+        var sourceProvider = new PlanningSyncLocationProvider(
+            sourceLocation,
+            files: [new SyncFile("docs/notes.txt", DateTimeOffset.Parse("2026-07-20T10:00:00Z"), 5)]);
+        var targetProvider = new PlanningSyncLocationProvider(
+            targetLocation,
+            directories: [new SyncDirectory("docs")]);
+        var service = new SyncApplicationService([sourceProvider, targetProvider]);
+
+        // Act
+        var plan = await service.BuildPlanAsync(syncPair, CancellationToken.None);
+
+        // Assert
+        Assert.Contains(plan.Actions, action => action is CopyFileSyncAction && action.RelativePath == "docs/notes.txt");
+        Assert.DoesNotContain(plan.Actions, action => action is DeleteDirectorySyncAction && action.RelativePath == "docs");
+    }
+
+    [Fact]
+    public async Task BuildPlanAsync_reports_source_file_and_target_directory_as_unsupported_path_type()
+    {
+        // Arrange
+        var sourceLocation = new SyncLocation("source");
+        var targetLocation = new SyncLocation("target");
+        var syncPair = new SyncPair(SyncMode.OneWay, sourceLocation, targetLocation);
+        var sourceProvider = new PlanningSyncLocationProvider(
+            sourceLocation,
+            files: [new SyncFile("docs", DateTimeOffset.Parse("2026-07-20T10:00:00Z"), 5)]);
+        var targetProvider = new PlanningSyncLocationProvider(
+            targetLocation,
+            directories: [new SyncDirectory("docs")]);
+        var service = new SyncApplicationService([sourceProvider, targetProvider]);
+
+        // Act
+        var plan = await service.BuildPlanAsync(syncPair, CancellationToken.None);
+
+        // Assert
+        Assert.Empty(plan.Actions);
+        Assert.Contains(plan.Problems, problem => problem.Kind == SyncLocationProblemKind.UnsupportedPathType);
+    }
+
+    [Fact]
+    public async Task BuildPlanAsync_reports_source_directory_and_target_file_as_unsupported_path_type()
+    {
+        // Arrange
+        var sourceLocation = new SyncLocation("source");
+        var targetLocation = new SyncLocation("target");
+        var syncPair = new SyncPair(SyncMode.OneWay, sourceLocation, targetLocation);
+        var sourceProvider = new PlanningSyncLocationProvider(
+            sourceLocation,
+            files: [new SyncFile("docs/notes.txt", DateTimeOffset.Parse("2026-07-20T10:00:00Z"), 5)]);
+        var targetProvider = new PlanningSyncLocationProvider(
+            targetLocation,
+            files: [new SyncFile("docs", DateTimeOffset.Parse("2026-07-20T10:00:00Z"), 5)]);
+        var service = new SyncApplicationService([sourceProvider, targetProvider]);
+
+        // Act
+        var plan = await service.BuildPlanAsync(syncPair, CancellationToken.None);
+
+        // Assert
+        Assert.Empty(plan.Actions);
+        Assert.Contains(plan.Problems, problem => problem.Kind == SyncLocationProblemKind.UnsupportedPathType);
     }
 
     [Fact]
@@ -465,5 +731,75 @@ public sealed class SyncApplicationServiceTests
         }
 
         private sealed record StoredFile(SyncFile Metadata, byte[] Content);
+    }
+
+    private sealed class PlanningSyncLocationProvider : ISyncLocationProvider
+    {
+        private readonly SyncLocationListing _listing;
+        private readonly long? _availableStorageBytes;
+
+        public PlanningSyncLocationProvider(
+            SyncLocation location,
+            string? localRootPath = null,
+            IReadOnlyCollection<SyncFile>? files = null,
+            IReadOnlyCollection<SyncDirectory>? directories = null,
+            IReadOnlyCollection<string>? hiddenEntries = null,
+            long? availableStorageBytes = null,
+            StringComparer? relativePathComparer = null)
+        {
+            Location = location;
+            LocalRootPath = localRootPath;
+            RelativePathComparer = relativePathComparer ?? StringComparer.Ordinal;
+            _listing = new SyncLocationListing(
+                files ?? [],
+                directories ?? [],
+                [],
+                [],
+                hiddenEntries ?? []);
+            _availableStorageBytes = availableStorageBytes;
+        }
+
+        public SyncLocation Location { get; }
+
+        public string? LocalRootPath { get; }
+
+        public StringComparer RelativePathComparer { get; }
+
+        public int ListEntriesCallCount { get; private set; }
+
+        public Task<IReadOnlyCollection<SyncFile>> ListFilesAsync(CancellationToken cancellationToken)
+        {
+            return Task.FromResult(_listing.Files);
+        }
+
+        public Task<SyncLocationListing> ListEntriesAsync(CancellationToken cancellationToken)
+        {
+            ListEntriesCallCount++;
+            return Task.FromResult(_listing);
+        }
+
+        public Task<long?> GetAvailableStorageBytesAsync(CancellationToken cancellationToken)
+        {
+            return Task.FromResult(_availableStorageBytes);
+        }
+
+        public Task<Stream> OpenReadAsync(string relativePath, CancellationToken cancellationToken)
+        {
+            throw new NotSupportedException();
+        }
+
+        public Task WriteFileAsync(
+            string relativePath,
+            Stream content,
+            DateTimeOffset lastModifiedUtc,
+            CancellationToken cancellationToken)
+        {
+            throw new NotSupportedException();
+        }
+
+        public Task DeleteFileAsync(string relativePath, CancellationToken cancellationToken)
+        {
+            throw new NotSupportedException();
+        }
     }
 }
