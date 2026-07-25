@@ -4,7 +4,16 @@ public interface ISyncLocationProvider
 {
     SyncLocation Location { get; }
 
+    string? LocalRootPath => null;
+
+    StringComparer RelativePathComparer => StringComparer.Ordinal;
+
     bool SupportsSymbolicLinkPreservation => false;
+
+    Task<long?> GetAvailableStorageBytesAsync(CancellationToken cancellationToken)
+    {
+        return Task.FromResult<long?>(null);
+    }
 
     Task<IReadOnlyCollection<SyncFile>> ListFilesAsync(CancellationToken cancellationToken);
 
