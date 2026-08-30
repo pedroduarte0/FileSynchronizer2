@@ -50,6 +50,32 @@ public sealed class SyncApplicationServiceTests
     }
 
     [Fact]
+    public async Task BuildPlanAsync_blocks_overlapping_local_locations()
+    {
+        // Arrange
+        var sourceLocation = new SyncLocation("source");
+        var targetLocation = new SyncLocation("target");
+        var syncPair = new SyncPair(SyncMode.OneWay, sourceLocation, targetLocation);
+        var sourceRootPath = Path.Combine(Path.GetTempPath(), "FileSynchronizer2", "source");
+        var service = new SyncApplicationService(
+            [
+                InMemorySyncLocationProvider.WithLocalRoot(sourceLocation, sourceRootPath),
+                InMemorySyncLocationProvider.WithLocalRoot(
+                    targetLocation,
+                    Path.Combine(sourceRootPath, "target")),
+            ]);
+
+        // Act
+        var plan = await service.BuildPlanAsync(syncPair, CancellationToken.None);
+
+        // Assert
+        Assert.Empty(plan.Actions);
+        Assert.Contains(
+            plan.Problems,
+            problem => problem.Kind == SyncLocationProblemKind.OverlappingLocation);
+    }
+
+    [Fact]
     public async Task BuildPlanAsync_returns_overwrite_action_for_same_path_file_with_different_metadata()
     {
         // Arrange
@@ -487,6 +513,7 @@ public sealed class SyncApplicationServiceTests
         private readonly IReadOnlyCollection<SyncLocationProblem> _problems;
         private readonly SyncLocationProblem? _readFailure;
         private readonly bool _supportsSymbolicLinkPreservation;
+        private readonly string? _localRootPath;
 
         private InMemorySyncLocationProvider(
             SyncLocation location,
@@ -495,7 +522,8 @@ public sealed class SyncApplicationServiceTests
             IEnumerable<SyncSymbolicLink> symbolicLinks,
             IEnumerable<SyncLocationProblem> problems,
             SyncLocationProblem? readFailure,
-            bool supportsSymbolicLinkPreservation = false)
+            bool supportsSymbolicLinkPreservation = false,
+            string? localRootPath = null)
         {
             Location = location;
             _files = files.ToDictionary(file => file.Metadata.RelativePath, StringComparer.Ordinal);
@@ -506,17 +534,32 @@ public sealed class SyncApplicationServiceTests
             _problems = problems.ToList();
             _readFailure = readFailure;
             _supportsSymbolicLinkPreservation = supportsSymbolicLinkPreservation;
+            _localRootPath = localRootPath;
         }
 
         public SyncLocation Location { get; }
 
         public bool SupportsSymbolicLinkPreservation => _supportsSymbolicLinkPreservation;
 
+        public string? LocalRootPath => _localRootPath;
+
         public static InMemorySyncLocationProvider Empty(
             SyncLocation location,
             params SyncLocationProblem[] problems)
         {
             return new InMemorySyncLocationProvider(location, [], [], [], problems, readFailure: null);
+        }
+
+        public static InMemorySyncLocationProvider WithLocalRoot(SyncLocation location, string localRootPath)
+        {
+            return new InMemorySyncLocationProvider(
+                location,
+                [],
+                [],
+                [],
+                [],
+                readFailure: null,
+                localRootPath: localRootPath);
         }
 
         public static InMemorySyncLocationProvider WithFiles(SyncLocation location, params SyncFile[] files)

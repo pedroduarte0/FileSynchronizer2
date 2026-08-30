@@ -29,6 +29,12 @@ public sealed class SyncApplicationService
         var sourceProvider = GetProvider(syncPair.SourceLocation);
         var targetProvider = GetProvider(syncPair.TargetLocation);
 
+        var overlappingLocationProblem = GetOverlappingLocationProblem(sourceProvider, targetProvider);
+        if (overlappingLocationProblem is not null)
+        {
+            return new SyncPlan(syncPair, [], [overlappingLocationProblem]);
+        }
+
         var previousState = _stateStore is null
             ? null
             : await _stateStore.GetStateAsync(syncPair, cancellationToken);
@@ -220,6 +226,48 @@ public sealed class SyncApplicationService
     {
         return sourceFile.LastModifiedUtc != targetFile.LastModifiedUtc
             || sourceFile.Size != targetFile.Size;
+    }
+
+    private static SyncLocationProblem? GetOverlappingLocationProblem(
+        ISyncLocationProvider sourceProvider,
+        ISyncLocationProvider targetProvider)
+    {
+        if (sourceProvider.LocalRootPath is not { } sourceRootPath
+            || targetProvider.LocalRootPath is not { } targetRootPath
+            || !AreSameOrNestedPaths(sourceRootPath, targetRootPath))
+        {
+            return null;
+        }
+
+        return new SyncLocationProblem(
+            SyncLocationProblemKind.OverlappingLocation,
+            string.Empty,
+            "Local sync locations must not be the same location or nested within one another.");
+    }
+
+    private static bool AreSameOrNestedPaths(string firstPath, string secondPath)
+    {
+        var comparison = OperatingSystem.IsWindows()
+            ? StringComparison.OrdinalIgnoreCase
+            : StringComparison.Ordinal;
+        var firstRootPath = Path.TrimEndingDirectorySeparator(Path.GetFullPath(firstPath));
+        var secondRootPath = Path.TrimEndingDirectorySeparator(Path.GetFullPath(secondPath));
+
+        return firstRootPath.Equals(secondRootPath, comparison)
+            || IsNestedWithin(firstRootPath, secondRootPath, comparison)
+            || IsNestedWithin(secondRootPath, firstRootPath, comparison);
+    }
+
+    private static bool IsNestedWithin(
+        string candidatePath,
+        string potentialParentPath,
+        StringComparison comparison)
+    {
+        var parentPathWithSeparator = potentialParentPath.EndsWith(Path.DirectorySeparatorChar)
+            ? potentialParentPath
+            : potentialParentPath + Path.DirectorySeparatorChar;
+
+        return candidatePath.StartsWith(parentPathWithSeparator, comparison);
     }
 
     private async Task ApplyCopyActionAsync(
