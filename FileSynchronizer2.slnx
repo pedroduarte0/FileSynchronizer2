@@ -6,7 +6,9 @@
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/FileSynchronizer.Core.Tests/FileSynchronizer.Core.Tests.csproj" />
-    <Project Path="tests/FileSynchronizer.Infrastructure.Tests/FileSynchronizer.Infrastructure.Tests.csproj" />
+    <Project Path="tests/FileSynchronizer.Infrastructure.Tests/FileSynchronizer.Infrastructure.Tests.csproj">
+      <Build Solution="Debug|*" Project="false" />
+    </Project>
     <Project Path="tests/FileSynchronizer.IntegrationTests/FileSynchronizer.IntegrationTests.csproj" />
   </Folder>
 </Solution>

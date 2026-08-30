@@ -46,6 +46,7 @@ public sealed class SyncApplicationServiceTests
         var action = Assert.Single(plan.Actions);
         var delete = Assert.IsType<DeleteFileSyncAction>(action);
         Assert.Equal("stale.txt", delete.RelativePath);
+        Assert.Equal(DeleteFileReason.TargetOnlyFile, delete.Reason);
     }
 
     [Fact]
@@ -87,6 +88,77 @@ public sealed class SyncApplicationServiceTests
 
         // Assert
         Assert.True(state.ContainsFile("notes.txt"));
+    }
+
+    [Fact]
+    public void GetDeletedFiles_returns_files_present_in_previous_state_but_missing_from_current_state()
+    {
+        // Arrange
+        var lastModifiedUtc = DateTimeOffset.Parse("2026-07-20T10:00:00Z");
+        var previousState = new SyncState(
+        [
+            new SyncFile("deleted.txt", lastModifiedUtc, 5),
+            new SyncFile("retained.txt", lastModifiedUtc, 5),
+        ]);
+        var currentState = new SyncState([new SyncFile("retained.txt", lastModifiedUtc, 5)]);
+
+        // Act
+        var deletedFiles = previousState.GetDeletedFiles(currentState);
+
+        // Assert
+        var deletedFile = Assert.Single(deletedFiles);
+        Assert.Equal("deleted.txt", deletedFile.RelativePath);
+    }
+
+    [Fact]
+    public async Task BuildPlanAsync_does_not_persist_preview_state_or_result()
+    {
+        // Arrange
+        var sourceLocation = new SyncLocation("source");
+        var targetLocation = new SyncLocation("target");
+        var syncPair = new SyncPair(SyncMode.OneWay, sourceLocation, targetLocation);
+        var stateStore = new InMemorySyncStateStore();
+        var resultStore = new InMemorySyncResultStore();
+        var service = new SyncApplicationService(
+            [InMemorySyncLocationProvider.Empty(sourceLocation), InMemorySyncLocationProvider.Empty(targetLocation)],
+            stateStore,
+            resultStore);
+
+        // Act
+        await service.BuildPlanAsync(syncPair, CancellationToken.None);
+
+        // Assert
+        Assert.Empty(stateStore.SavedStates);
+        Assert.Empty(resultStore.Results);
+    }
+
+    [Fact]
+    public async Task BuildPlanAsync_loads_pair_state_to_detect_a_source_deletion_across_runs()
+    {
+        // Arrange
+        var sourceLocation = new SyncLocation("source");
+        var targetLocation = new SyncLocation("target");
+        var syncPair = new SyncPair(SyncMode.OneWay, sourceLocation, targetLocation);
+        var deletedFile = new SyncFile("deleted.txt", DateTimeOffset.Parse("2026-07-20T10:00:00Z"), 5);
+        var stateStore = new InMemorySyncStateStore();
+        stateStore.SavedStates[syncPair] = new SyncPairState(
+            new SyncState([deletedFile]),
+            new SyncState([deletedFile]));
+        var serviceAfterRestart = new SyncApplicationService(
+            [
+                InMemorySyncLocationProvider.Empty(sourceLocation),
+                InMemorySyncLocationProvider.WithFiles(targetLocation, deletedFile),
+            ],
+            stateStore);
+
+        // Act
+        var plan = await serviceAfterRestart.BuildPlanAsync(syncPair, CancellationToken.None);
+
+        // Assert
+        Assert.Equal(syncPair, Assert.Single(stateStore.GetRequests));
+        var delete = Assert.IsType<DeleteFileSyncAction>(Assert.Single(plan.Actions));
+        Assert.Equal("deleted.txt", delete.RelativePath);
+        Assert.Equal(DeleteFileReason.SourceDeletion, delete.Reason);
     }
 
     [Fact]
@@ -226,6 +298,112 @@ public sealed class SyncApplicationServiceTests
     }
 
     [Fact]
+    public async Task ApplyPlanAsync_persists_snapshots_and_result_after_successful_action()
+    {
+        // Arrange
+        var sourceLocation = new SyncLocation("source");
+        var targetLocation = new SyncLocation("target");
+        var syncPair = new SyncPair(SyncMode.OneWay, sourceLocation, targetLocation);
+        var sourceFile = new SyncFile("notes.txt", DateTimeOffset.Parse("2026-07-20T10:00:00Z"), 5);
+        var sourceProvider = InMemorySyncLocationProvider.WithFiles(sourceLocation, sourceFile);
+        var targetProvider = InMemorySyncLocationProvider.Empty(targetLocation);
+        var stateStore = new InMemorySyncStateStore();
+        var resultStore = new InMemorySyncResultStore();
+        var service = new SyncApplicationService(
+            [sourceProvider, targetProvider],
+            stateStore,
+            resultStore,
+            new SyncResultRetention(2));
+        var plan = new SyncPlan(syncPair, [new CopyFileSyncAction(sourceFile.RelativePath)]);
+
+        // Act
+        await service.ApplyPlanAsync(plan, CancellationToken.None);
+
+        // Assert
+        var savedState = stateStore.SavedStates[syncPair];
+        Assert.True(savedState.SourceState.ContainsFile("notes.txt"));
+        Assert.True(savedState.TargetState.ContainsFile("notes.txt"));
+        var retainedResult = Assert.Single(resultStore.Results);
+        Assert.Equal(2, retainedResult.Retention.MaximumResults);
+    }
+
+    [Fact]
+    public async Task ApplyPlanAsync_persists_initial_baseline_after_successful_no_change_run()
+    {
+        // Arrange
+        var sourceLocation = new SyncLocation("source");
+        var targetLocation = new SyncLocation("target");
+        var syncPair = new SyncPair(SyncMode.OneWay, sourceLocation, targetLocation);
+        var stateStore = new InMemorySyncStateStore();
+        var service = new SyncApplicationService(
+            [InMemorySyncLocationProvider.Empty(sourceLocation), InMemorySyncLocationProvider.Empty(targetLocation)],
+            stateStore);
+
+        // Act
+        await service.ApplyPlanAsync(SyncPlan.Empty(syncPair), CancellationToken.None);
+
+        // Assert
+        var savedState = stateStore.SavedStates[syncPair];
+        Assert.Empty(savedState.SourceState.Files);
+        Assert.Empty(savedState.TargetState.Files);
+    }
+
+    [Fact]
+    public async Task ApplyPlanAsync_does_not_replace_baseline_after_partially_failed_run()
+    {
+        // Arrange
+        var sourceLocation = new SyncLocation("source");
+        var targetLocation = new SyncLocation("target");
+        var syncPair = new SyncPair(SyncMode.OneWay, sourceLocation, targetLocation);
+        var stateStore = new InMemorySyncStateStore();
+        var previousFile = new SyncFile("previous.txt", DateTimeOffset.Parse("2026-07-20T10:00:00Z"), 5);
+        var previousState = new SyncPairState(new SyncState([previousFile]), new SyncState([previousFile]));
+        stateStore.SavedStates[syncPair] = previousState;
+        var service = new SyncApplicationService(
+            [InMemorySyncLocationProvider.Empty(sourceLocation), InMemorySyncLocationProvider.Empty(targetLocation)],
+            stateStore);
+        var plan = new SyncPlan(
+            syncPair,
+            [new CopyFileSyncAction("missing.txt"), new CreateDirectorySyncAction("created")]);
+
+        // Act
+        var result = await service.ApplyPlanAsync(plan, CancellationToken.None);
+
+        // Assert
+        Assert.Contains(result.Outcomes, outcome => outcome.Status == SyncActionStatus.Failed);
+        Assert.Contains(result.Outcomes, outcome => outcome.Status == SyncActionStatus.Applied);
+        Assert.Same(previousState, stateStore.SavedStates[syncPair]);
+    }
+
+    [Fact]
+    public async Task ApplyPlanAsync_does_not_persist_incomplete_snapshots()
+    {
+        // Arrange
+        var sourceLocation = new SyncLocation("source");
+        var targetLocation = new SyncLocation("target");
+        var syncPair = new SyncPair(SyncMode.OneWay, sourceLocation, targetLocation);
+        var sourceFile = new SyncFile("notes.txt", DateTimeOffset.Parse("2026-07-20T10:00:00Z"), 5);
+        var listingProblem = new SyncLocationProblem(
+            SyncLocationProblemKind.AccessProblem,
+            string.Empty,
+            "Source listing is incomplete.");
+        var sourceProvider = InMemorySyncLocationProvider.WithFilesAndProblems(
+            sourceLocation,
+            [sourceFile],
+            [listingProblem]);
+        var targetProvider = InMemorySyncLocationProvider.Empty(targetLocation);
+        var stateStore = new InMemorySyncStateStore();
+        var service = new SyncApplicationService([sourceProvider, targetProvider], stateStore);
+        var plan = new SyncPlan(syncPair, [new CopyFileSyncAction(sourceFile.RelativePath)]);
+
+        // Act
+        await service.ApplyPlanAsync(plan, CancellationToken.None);
+
+        // Assert
+        Assert.Empty(stateStore.SavedStates);
+    }
+
+    [Fact]
     public async Task ApplyPlanAsync_creates_planned_empty_directory()
     {
         // Arrange
@@ -352,6 +530,20 @@ public sealed class SyncApplicationServiceTests
                 readFailure: null);
         }
 
+        public static InMemorySyncLocationProvider WithFilesAndProblems(
+            SyncLocation location,
+            IReadOnlyCollection<SyncFile> files,
+            IReadOnlyCollection<SyncLocationProblem> problems)
+        {
+            return new InMemorySyncLocationProvider(
+                location,
+                files.Select(file => new StoredFile(file, Encoding.UTF8.GetBytes(file.RelativePath))),
+                [],
+                [],
+                problems,
+                readFailure: null);
+        }
+
         public static InMemorySyncLocationProvider WithDirectories(
             SyncLocation location,
             params SyncDirectory[] directories)
@@ -465,5 +657,49 @@ public sealed class SyncApplicationServiceTests
         }
 
         private sealed record StoredFile(SyncFile Metadata, byte[] Content);
+    }
+
+    private sealed class InMemorySyncStateStore : ISyncStateStore
+    {
+        public Dictionary<SyncPair, SyncPairState> SavedStates { get; } = [];
+
+        public List<SyncPair> GetRequests { get; } = [];
+
+        public Task<SyncPairState?> GetStateAsync(SyncPair syncPair, CancellationToken cancellationToken)
+        {
+            GetRequests.Add(syncPair);
+            return Task.FromResult(SavedStates.GetValueOrDefault(syncPair));
+        }
+
+        public Task SaveStateAsync(SyncPair syncPair, SyncPairState state, CancellationToken cancellationToken)
+        {
+            SavedStates[syncPair] = state;
+            return Task.CompletedTask;
+        }
+    }
+
+    private sealed class InMemorySyncResultStore : ISyncResultStore
+    {
+        public List<(RetainedSyncResult Result, SyncResultRetention Retention)> Results { get; } = [];
+
+        public Task SaveResultAsync(
+            SyncPair syncPair,
+            RetainedSyncResult result,
+            SyncResultRetention retention,
+            CancellationToken cancellationToken)
+        {
+            Results.Add((result, retention));
+            return Task.CompletedTask;
+        }
+
+        public Task<IReadOnlyCollection<RetainedSyncResult>> GetResultsAsync(
+            SyncPair syncPair,
+            CancellationToken cancellationToken)
+        {
+            IReadOnlyCollection<RetainedSyncResult> results = Results
+                .Select(entry => entry.Result)
+                .ToList();
+            return Task.FromResult(results);
+        }
     }
 }

@@ -3,13 +3,23 @@ namespace FileSynchronizer.Core;
 public sealed class SyncApplicationService
 {
     private readonly IReadOnlyDictionary<SyncLocation, ISyncLocationProvider> _providers;
+    private readonly ISyncStateStore? _stateStore;
+    private readonly ISyncResultStore? _resultStore;
+    private readonly SyncResultRetention _resultRetention;
 
-    public SyncApplicationService(IEnumerable<ISyncLocationProvider> providers)
+    public SyncApplicationService(
+        IEnumerable<ISyncLocationProvider> providers,
+        ISyncStateStore? stateStore = null,
+        ISyncResultStore? resultStore = null,
+        SyncResultRetention? resultRetention = null)
     {
         _providers = providers.ToDictionary(provider => provider.Location);
+        _stateStore = stateStore;
+        _resultStore = resultStore;
+        _resultRetention = resultRetention ?? new SyncResultRetention(20);
     }
 
-    public Task<SyncPlan> BuildPlanAsync(SyncPair syncPair, CancellationToken cancellationToken)
+    public async Task<SyncPlan> BuildPlanAsync(SyncPair syncPair, CancellationToken cancellationToken)
     {
         if (syncPair.Mode != SyncMode.OneWay)
         {
@@ -19,7 +29,16 @@ public sealed class SyncApplicationService
         var sourceProvider = GetProvider(syncPair.SourceLocation);
         var targetProvider = GetProvider(syncPair.TargetLocation);
 
-        return BuildPlanAsync(syncPair, sourceProvider, targetProvider, cancellationToken);
+        var previousState = _stateStore is null
+            ? null
+            : await _stateStore.GetStateAsync(syncPair, cancellationToken);
+
+        return await BuildPlanAsync(
+            syncPair,
+            sourceProvider,
+            targetProvider,
+            previousState,
+            cancellationToken);
     }
 
     public async Task<SyncState> UpdateStateAsync(SyncLocation location, CancellationToken cancellationToken)
@@ -86,13 +105,39 @@ public sealed class SyncApplicationService
         var updatedState = await UpdateStateAsync(plan.SyncPair.TargetLocation, cancellationToken);
         problems.AddRange(updatedState.Problems);
 
-        return new SyncResult(outcomes, updatedState, problems);
+        var allActionsApplied = outcomes.All(outcome => outcome.Status == SyncActionStatus.Applied);
+        if (_stateStore is not null && allActionsApplied && problems.Count == 0)
+        {
+            var sourceState = await UpdateStateAsync(plan.SyncPair.SourceLocation, cancellationToken);
+            problems.AddRange(sourceState.Problems);
+            if (sourceState.Problems.Count == 0 && updatedState.Problems.Count == 0)
+            {
+                await _stateStore.SaveStateAsync(
+                    plan.SyncPair,
+                    new SyncPairState(sourceState, updatedState),
+                    cancellationToken);
+            }
+        }
+
+        var result = new SyncResult(outcomes, updatedState, problems);
+
+        if (_resultStore is not null)
+        {
+            await _resultStore.SaveResultAsync(
+                plan.SyncPair,
+                new RetainedSyncResult(DateTimeOffset.UtcNow, result),
+                _resultRetention,
+                cancellationToken);
+        }
+
+        return result;
     }
 
     private static async Task<SyncPlan> BuildPlanAsync(
         SyncPair syncPair,
         ISyncLocationProvider sourceProvider,
         ISyncLocationProvider targetProvider,
+        SyncPairState? previousState,
         CancellationToken cancellationToken)
     {
         var sourceListing = await sourceProvider.ListEntriesAsync(cancellationToken);
@@ -114,6 +159,18 @@ public sealed class SyncApplicationService
             .Select(directory => directory.RelativePath)
             .ToHashSet(StringComparer.Ordinal);
         var targetFilesByPath = targetFiles.ToDictionary(file => file.RelativePath, StringComparer.Ordinal);
+        var currentSourceState = new SyncState(sourceFiles, sourceListing.Problems);
+        var knownSourceDeletionPaths = previousState?.SourceState
+            .GetDeletedFiles(currentSourceState)
+            .Select(file => file.RelativePath)
+            .ToHashSet(StringComparer.Ordinal)
+            ?? [];
+        var targetFilesForKnownSourceDeletions = targetFiles
+            .Where(file => knownSourceDeletionPaths.Contains(file.RelativePath));
+        var otherTargetOnlyFiles = targetFiles
+            .Where(file =>
+                !sourcePaths.Contains(file.RelativePath)
+                && !knownSourceDeletionPaths.Contains(file.RelativePath));
 
         List<SyncPlanAction> actions =
         [
@@ -127,9 +184,11 @@ public sealed class SyncApplicationService
                 && HasDifferentMetadata(file, targetFile))
             .Select(file => new OverwriteFileSyncAction(file.RelativePath)),
 
-            .. targetFiles
-            .Where(file => !sourcePaths.Contains(file.RelativePath))
-            .Select(file => new DeleteFileSyncAction(file.RelativePath)),
+            .. targetFilesForKnownSourceDeletions
+            .Select(file => new DeleteFileSyncAction(file.RelativePath, DeleteFileReason.SourceDeletion)),
+
+            .. otherTargetOnlyFiles
+            .Select(file => new DeleteFileSyncAction(file.RelativePath, DeleteFileReason.TargetOnlyFile)),
 
             .. sourceDirectories
             .Where(directory => !targetDirectoryPaths.Contains(directory.RelativePath))
