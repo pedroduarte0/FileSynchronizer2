@@ -13,4 +13,15 @@ public sealed record SyncState(
     {
         return Files.Any(file => file.RelativePath == relativePath);
     }
+
+    public IReadOnlyCollection<SyncFile> GetDeletedFiles(SyncState currentState)
+    {
+        var currentPaths = currentState.Files
+            .Select(file => file.RelativePath)
+            .ToHashSet(StringComparer.Ordinal);
+
+        return Files
+            .Where(file => !currentPaths.Contains(file.RelativePath))
+            .ToList();
+    }
 }
